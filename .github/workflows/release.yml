@@ -1,0 +1,34 @@
+# Publie une release à chaque tag vX.Y.Z : Blip.app universelle, zippée, que l'app installe d'elle-même.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Vérifier que le tag correspond à la version de l'app
+        run: |
+          version=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Resources/Info.plist)
+          if [[ "v$version" != "$GITHUB_REF_NAME" ]]; then
+            echo "::error::Le tag $GITHUB_REF_NAME ne correspond pas à la version $version de Resources/Info.plist"
+            exit 1
+          fi
+
+      - name: Compiler
+        run: |
+          swift --version
+          ./scripts/build.sh
+          ditto -c -k --keepParent build/Blip.app Blip.zip
+
+      - name: Publier
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" Blip.zip --title "Blip ${GITHUB_REF_NAME#v}" --generate-notes
