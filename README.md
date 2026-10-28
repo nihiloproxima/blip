@@ -90,7 +90,7 @@ Si l'app n'est pas dans un dossier modifiable, par exemple lancée depuis une im
 
 ### Publier une version
 
-Les releases sont construites par GitHub Actions ([`release.yml`](.github/workflows/release.yml)) à chaque tag `vX.Y.Z` :
+GitHub Actions ([`release.yml`](.github/workflows/release.yml)) compile chaque push sur `main` et chaque PR, et publie une release à chaque tag `vX.Y.Z` :
 
 ```sh
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 0.2.0" Resources/Info.plist

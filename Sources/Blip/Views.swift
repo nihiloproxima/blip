@@ -351,7 +351,7 @@ struct SettingsView: View {
                     .help("Petits sons quand tu tries, montes de niveau ou atteins l'inbox zero")
             }
             Section("Système") {
-                Toggle("Lancer à l'ouverture de session", isOn: Binding(get: { launchAtLogin }, set: setLaunchAtLogin))
+                Toggle("Lancer à l'ouverture de session", isOn: Binding(get: { launchAtLogin }, set: { setLaunchAtLogin($0) }))
                     .help("Démarre Blip automatiquement quand tu ouvres ta session macOS")
                 if let launchError {
                     Text(launchError).font(.caption).foregroundStyle(.red)

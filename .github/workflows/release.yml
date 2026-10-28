@@ -1,9 +1,12 @@
-# Publie une release à chaque tag vX.Y.Z : Blip.app universelle, zippée, que l'app installe d'elle-même.
+# Compile chaque push sur main et chaque PR ; à chaque tag vX.Y.Z, publie la release :
+# Blip.app universelle, zippée, que l'app installe d'elle-même.
 name: Release
 
 on:
   push:
+    branches: [main]
     tags: ["v*"]
+  pull_request:
 
 permissions:
   contents: write
@@ -15,6 +18,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Vérifier que le tag correspond à la version de l'app
+        if: github.ref_type == 'tag'
         run: |
           version=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Resources/Info.plist)
           if [[ "v$version" != "$GITHUB_REF_NAME" ]]; then
@@ -29,6 +33,7 @@ jobs:
           ditto -c -k --keepParent build/Blip.app Blip.zip
 
       - name: Publier
+        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" Blip.zip --title "Blip ${GITHUB_REF_NAME#v}" --generate-notes
