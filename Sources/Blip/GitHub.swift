@@ -48,25 +48,22 @@ struct WorkItem: Listable, Decodable, Sendable {
     let reviewDecision: String?
     let author: Author?
     let repository: Repository
-    private let commits: LastCommit?
+    private let commits: Commits?
 
     struct Author: Decodable, Hashable, Sendable { let login: String }
     struct Repository: Decodable, Hashable, Sendable { let nameWithOwner: String }
 
+    private struct Commits: Decodable, Hashable, Sendable {
+        let nodes: [Node]
+        struct Node: Decodable, Hashable, Sendable { let commit: Commit }
+        struct Commit: Decodable, Hashable, Sendable { let statusCheckRollup: Rollup? }
+        struct Rollup: Decodable, Hashable, Sendable { let state: String }
+    }
+
     var repositoryName: String { repository.nameWithOwner }
     var isPullRequest: Bool { kind == "PullRequest" }
-    var checks: String? { commits?.checks }
-}
-
-/// `commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }` d'une PR.
-struct LastCommit: Decodable, Hashable, Sendable {
-    let nodes: [Node]
-    struct Node: Decodable, Hashable, Sendable { let commit: Commit }
-    struct Commit: Decodable, Hashable, Sendable { let statusCheckRollup: Rollup? }
-    struct Rollup: Decodable, Hashable, Sendable { let state: String }
-
     /// CI du dernier commit : `SUCCESS`, `FAILURE`, `ERROR`, `PENDING`, `EXPECTED` ou nil.
-    var checks: String? { nodes.first?.commit.statusCheckRollup?.state }
+    var checks: String? { commits?.nodes.first?.commit.statusCheckRollup?.state }
 }
 
 /// Le travail en cours : mes PR, les reviews qu'on m'a demandées, ce qui m'est assigné.
@@ -78,15 +75,6 @@ struct Work: Sendable {
 
 enum SubjectState: Sendable {
     case open, draft, merged, closed, notPlanned
-
-    /// Encore susceptible de changer (et d'avoir une CI qui tourne).
-    var isOpen: Bool { self == .open || self == .draft }
-}
-
-/// État d'une PR ou d'une issue, et de sa CI pour une PR.
-struct SubjectInfo: Sendable {
-    let state: SubjectState
-    let checks: String?
 }
 
 enum GitHubError: LocalizedError {
@@ -180,13 +168,13 @@ struct GitHub: Sendable {
         try await send(Self.api.appending(path: "notifications/threads/\(id)/subscription"), method: "PUT", body: ["ignored": true])
     }
 
-    /// État (ouverte, mergée…) des PR et issues, et CI des PR, en une requête GraphQL par lot de 50.
-    func subjects(of items: [GHNotification]) async throws -> [String: SubjectInfo] {
-        struct Node: Decodable { let state: String?; let isDraft: Bool?; let stateReason: String?; let commits: LastCommit? }
+    /// État (ouverte, mergée…) des PR et issues, en une requête GraphQL par lot de 50.
+    func states(of items: [GHNotification]) async throws -> [String: SubjectState] {
+        struct Node: Decodable { let state: String?; let isDraft: Bool?; let stateReason: String? }
         struct Repository: Decodable { let issueOrPullRequest: Node? }
         struct Response: Decodable { let data: [String: Repository?]? }
 
-        var result: [String: SubjectInfo] = [:]
+        var result: [String: SubjectState] = [:]
         let targets = items.filter { $0.number != nil }
         for start in stride(from: 0, to: targets.count, by: 50) {
             var ids: [String: String] = [:]
@@ -197,20 +185,18 @@ struct GitHub: Sendable {
                 ids["n\(index)"] = item.id
                 fields.append("""
                 n\(index): repository(owner: \(Self.quoted(parts[0])), name: \(Self.quoted(parts[1]))) { \
-                issueOrPullRequest(number: \(number)) { ... on PullRequest { state isDraft \
-                commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } } ... on Issue { state stateReason } } }
+                issueOrPullRequest(number: \(number)) { ... on PullRequest { state isDraft } ... on Issue { state stateReason } } }
                 """)
             }
             guard !fields.isEmpty else { continue }
             let data = try await send(Self.api.appending(path: "graphql"), method: "POST", body: ["query": "query { \(fields.joined(separator: " ")) }"])
             for (alias, repository) in try Self.decoder.decode(Response.self, from: data).data ?? [:] {
                 guard let id = ids[alias], let node = repository?.issueOrPullRequest, let state = node.state else { continue }
-                let subjectState: SubjectState = switch state {
+                result[id] = switch state {
                 case "MERGED": .merged
                 case "CLOSED": node.stateReason == "NOT_PLANNED" ? .notPlanned : .closed
                 default: node.isDraft == true ? .draft : .open
                 }
-                result[id] = SubjectInfo(state: subjectState, checks: node.commits?.checks)
             }
         }
         return result
