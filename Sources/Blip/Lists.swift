@@ -1,9 +1,15 @@
 import SwiftUI
 
+/// Où est le focus clavier dans le popover : le champ de recherche ou la liste.
+enum PopoverFocus: Hashable {
+    case search, list
+}
+
 // MARK: - Onglets
 
 struct TabBar: View {
     let store: Store
+    let search: () -> Void
 
     var body: some View {
         HStack(spacing: 2) {
@@ -13,10 +19,54 @@ struct TabBar: View {
                 }
             }
             Spacer(minLength: 0)
+            IconButton("magnifyingglass", help: "Rechercher par titre, dépôt, #numéro ou @auteur (⌘F)") { search() }
+                .keyboardShortcut("f", modifiers: .command)
         }
-        .padding(.horizontal, 8)
+        .padding(.leading, 8)
+        .padding(.trailing, 10)
         .padding(.top, 8)
         .padding(.bottom, 4)
+    }
+}
+
+/// Champ de recherche : ↓ ou ↩ passe aux résultats, Échap efface puis ferme.
+struct SearchField: View {
+    @Binding var text: String
+    let focus: FocusState<PopoverFocus?>.Binding
+    let done: () -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+            TextField("Titre, dépôt, #numéro, @auteur…", text: $text)
+                .textFieldStyle(.plain)
+                .focused(focus, equals: .search)
+                .onSubmit { focus.wrappedValue = .list }
+                .onKeyPress(.downArrow) {
+                    focus.wrappedValue = .list
+                    return .handled
+                }
+                .onKeyPress(.escape) {
+                    done()
+                    return .handled
+                }
+            if !text.isEmpty {
+                Button {
+                    text = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+                .help("Effacer la recherche")
+            }
+        }
+        .font(.system(size: 12))
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 4)
+        .onAppear { focus.wrappedValue = .search }
     }
 }
 
@@ -55,6 +105,7 @@ private struct TabButton: View {
 /// Le contenu de l'onglet actif.
 struct TabContent: View {
     let store: Store
+    let focus: FocusState<PopoverFocus?>.Binding
     let close: () -> Void
 
     var body: some View {
@@ -63,6 +114,7 @@ struct TabContent: View {
             ItemList(
                 store: store,
                 items: store.notifications,
+                focus: focus,
                 open: { open($0, inBackground: $1) },
                 clear: { store.markRead([$0]) },
                 mute: { store.mute($0) },
@@ -71,6 +123,7 @@ struct TabContent: View {
                 NotificationRow(
                     item: item,
                     state: store.states[item.id],
+                    checks: store.checks[item.id],
                     selected: selected,
                     showRepository: !store.settings.groupByRepository,
                     read: { store.markRead([item]) },
@@ -80,10 +133,11 @@ struct TabContent: View {
                 InboxZeroView(game: store.game, petName: store.settings.petName)
             }
         case .history:
-            ItemList(store: store, items: store.history, open: { open($0, inBackground: $1) }) { item, selected in
+            ItemList(store: store, items: store.history, focus: focus, open: { open($0, inBackground: $1) }) { item, selected in
                 NotificationRow(
                     item: item,
                     state: store.states[item.id],
+                    checks: store.checks[item.id],
                     selected: selected,
                     showRepository: !store.settings.groupByRepository,
                     readAt: store.readDate(item)
@@ -92,7 +146,7 @@ struct TabContent: View {
                 EmptyState(symbol: "clock.arrow.circlepath", title: "Rien de lu récemment")
             }
         case .mine, .reviews, .assigned:
-            ItemList(store: store, items: workItems, open: { open($0, inBackground: $1) }) { item, selected in
+            ItemList(store: store, items: workItems, focus: focus, open: { open($0, inBackground: $1) }) { item, selected in
                 WorkRow(
                     item: item,
                     selected: selected,
@@ -140,6 +194,7 @@ struct TabContent: View {
 struct ItemList<Item: Listable, Row: View, Empty: View>: View {
     let store: Store
     let items: [Item]?
+    let focus: FocusState<PopoverFocus?>.Binding
     let open: (Item, _ inBackground: Bool) -> Void
     var clear: ((Item) -> Void)?
     var mute: ((Item) -> Void)?
@@ -150,9 +205,10 @@ struct ItemList<Item: Listable, Row: View, Empty: View>: View {
     var body: some View {
         if let items {
             VStack(spacing: 0) {
-                let repositories = store.repositories(in: items)
+                let matching = store.searched(items)
+                let repositories = store.repositories(in: matching)
                 if repositories.count > 1 || store.repositoryFilter != nil {
-                    RepositoryFilterBar(store: store, settings: store.settings, repositories: repositories, total: items.count)
+                    RepositoryFilterBar(store: store, settings: store.settings, repositories: repositories, total: matching.count)
                 }
                 content(items)
             }
@@ -165,7 +221,14 @@ struct ItemList<Item: Listable, Row: View, Empty: View>: View {
     private func content(_ items: [Item]) -> some View {
         let sections = store.sections(items)
         if sections.contains(where: { !$0.items.isEmpty }) {
-            SectionedList(sections: sections, open: open, clear: clear, mute: mute, clearSection: clearSection, row: row)
+            SectionedList(sections: sections, focus: focus, open: open, clear: clear, mute: mute, clearSection: clearSection, row: row)
+        } else if !store.searchText.isEmpty, !items.isEmpty {
+            EmptyState(
+                symbol: "magnifyingglass",
+                title: "Aucun résultat",
+                message: "Rien ne correspond à « \(store.searchText) » dans cet onglet.",
+                action: ("Effacer la recherche", { store.searchText = "" })
+            )
         } else if let filter = store.repositoryFilter, !items.isEmpty {
             EmptyState(
                 symbol: "line.3.horizontal.decrease.circle",
@@ -197,7 +260,14 @@ struct RepositoryFilterBar: View {
                         FilterChip(title: Style.shortName(repository.name), count: repository.count, selected: selected) {
                             store.repositoryFilter = selected ? nil : repository.name
                         }
-                        .help(selected ? "Retirer le filtre \(repository.name)" : "Afficher seulement \(repository.name), dans tous les onglets")
+                        .help(selected ? "Retirer le filtre \(repository.name)" : "Afficher seulement \(repository.name), dans tous les onglets (clic droit : masquer)")
+                        .contextMenu {
+                            Button("Masquer \(repository.name) dans Blip") { hide(repository: repository.name) }
+                            Button("Masquer tous les dépôts de \(Settings.owner(of: repository.name))") {
+                                if Settings.owner(of: store.repositoryFilter ?? "") == Settings.owner(of: repository.name) { store.repositoryFilter = nil }
+                                settings.hiddenOwners.insert(Settings.owner(of: repository.name))
+                            }
+                        }
                     }
                 }
                 .padding(.leading, 12)
@@ -219,6 +289,14 @@ struct RepositoryFilterBar: View {
             .padding(.trailing, 12)
         }
         .padding(.vertical, 4)
+    }
+}
+
+extension RepositoryFilterBar {
+    /// Masque un dépôt depuis sa puce ; les réglages permettent de le réafficher.
+    fileprivate func hide(repository: String) {
+        if store.repositoryFilter == repository { store.repositoryFilter = nil }
+        settings.hiddenRepositories.insert(repository)
     }
 }
 
@@ -250,13 +328,13 @@ struct FilterChip: View {
 /// Sections défilantes avec navigation au clavier : ↑↓, ↩ (⌘↩ en fond), E ou ⌫, M.
 struct SectionedList<Item: Listable, Row: View>: View {
     let sections: [ItemSection<Item>]
+    let focus: FocusState<PopoverFocus?>.Binding
     let open: (Item, _ inBackground: Bool) -> Void
     let clear: ((Item) -> Void)?
     let mute: ((Item) -> Void)?
     let clearSection: (([Item]) -> Void)?
     let row: (Item, _ selected: Bool) -> Row
     @State private var selection: String?
-    @FocusState private var focused: Bool
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -264,7 +342,7 @@ struct SectionedList<Item: Listable, Row: View>: View {
                 LazyVStack(alignment: .leading, spacing: 0, pinnedViews: .sectionHeaders) {
                     ForEach(sections) { section in
                         Section {
-                            ForEach(section.items, content: rowView)
+                            ForEach(section.items) { rowView($0) }
                         } header: {
                             header(section)
                         }
@@ -273,7 +351,7 @@ struct SectionedList<Item: Listable, Row: View>: View {
                 .padding(.bottom, 6)
             }
             .focusable()
-            .focused($focused)
+            .focused(focus, equals: .list)
             .focusEffectDisabled()
             .onKeyPress(.downArrow) {
                 move(by: 1, proxy)
@@ -293,8 +371,15 @@ struct SectionedList<Item: Listable, Row: View>: View {
                 action(item)
                 return .handled
             }
-            .onChange(of: ids, followSelection)
-            .task { focused = true }
+            .onChange(of: ids) { old, new in followSelection(old, new) }
+            .onChange(of: focus.wrappedValue) { old, new in
+                // Depuis la recherche, ↓ ou ↩ arrive directement sur le premier résultat.
+                if old == .search, new == .list, selection == nil { selection = ids.first }
+            }
+            .task {
+                // Ne vole pas le focus au champ de recherche quand les résultats changent.
+                if focus.wrappedValue == nil { focus.wrappedValue = .list }
+            }
         }
     }
 
@@ -401,6 +486,8 @@ struct EmptyState: View {
 struct NotificationRow: View {
     let item: GHNotification
     let state: SubjectState?
+    /// CI de la PR, seulement tant qu'elle est ouverte.
+    var checks: String?
     let selected: Bool
     var showRepository = false
     /// Dans l'historique : quand le fil a été lu. Il n'y a alors plus rien à trier.
@@ -434,6 +521,11 @@ struct NotificationRow: View {
                     if let number = item.number {
                         Text("·")
                         Text("#\(String(number))")
+                    }
+                    if let checks = Style.checks(checks) {
+                        Image(systemName: checks.symbol)
+                            .foregroundStyle(checks.color)
+                            .help(checks.help)
                     }
                     Text("·")
                     Text(readAt.map { "lu \(Style.age(of: $0))" } ?? Style.age(of: item.updatedAt))

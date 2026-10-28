@@ -55,10 +55,13 @@ final class Store {
     }
 
     private(set) var auth = Auth.checking
-    private(set) var notifications: [GHNotification] = []
+    /// Toutes les notifications non lues renvoyées par GitHub, y compris celles masquées dans les réglages.
+    private var inbox: [GHNotification] = []
     /// nil tant que le tableau de bord n'a pas été chargé.
-    private(set) var work: Work?
+    private var fetchedWork: Work?
     private(set) var states: [String: SubjectState] = [:]
+    /// CI des PR encore ouvertes, par notification.
+    private(set) var checks: [String: String] = [:]
     private(set) var isLoading = false
     private(set) var error: String?
     private(set) var lastSync: Date?
@@ -71,6 +74,8 @@ final class Store {
         didSet { if tab == .history { Task { await refreshHistory() } } }
     }
     var repositoryFilter: String?
+    /// Recherche (⌘F), combinée au filtre de dépôt ; remise à zéro à chaque ouverture du popover.
+    var searchText = ""
 
     let game = Game()
     let settings = Settings()
@@ -103,6 +108,28 @@ final class Store {
         }
     }
 
+    /// Ce que Blip montre (liste, compteur, humeur, bannières) : l'inbox moins ce qui est masqué dans les réglages.
+    var notifications: [GHNotification] { inbox.filter { settings.shows($0) } }
+
+    /// Le tableau de bord, sans les dépôts masqués.
+    var work: Work? {
+        fetchedWork.map { work in
+            Work(
+                mine: work.mine.filter { settings.shows(repository: $0.repositoryName) },
+                reviews: work.reviews.filter { settings.shows(repository: $0.repositoryName) },
+                assigned: work.assigned.filter { settings.shows(repository: $0.repositoryName) }
+            )
+        }
+    }
+
+    /// Dépôts croisés jusqu'ici, plus ceux masqués : ce que les réglages proposent de filtrer.
+    var knownRepositories: [String] {
+        var names = Set(settings.hiddenRepositories)
+        names.formUnion((inbox + readOnGitHub + recentlyCleared).map(\.repositoryName))
+        if let fetchedWork { names.formUnion((fetchedWork.mine + fetchedWork.reviews + fetchedWork.assigned).map(\.repositoryName)) }
+        return names.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    }
+
     var mood: Mood { Mood(unread: notifications.count) }
 
     /// Quelqu'un attend une action : review demandée, mention, assignation…
@@ -112,10 +139,10 @@ final class Store {
 
     /// Historique : ce qui a été lu ou archivé, le plus récemment lu en premier.
     var history: [GHNotification] {
-        let unread = Set(notifications.map(\.id))
+        let unread = Set(inbox.map(\.id))
         var seen = Set<String>()
         return (recentlyCleared + readOnGitHub)
-            .filter { !unread.contains($0.id) && seen.insert($0.id).inserted }
+            .filter { !unread.contains($0.id) && settings.shows($0) && seen.insert($0.id).inserted }
             .sorted { readDate($0) > readDate($1) }
     }
 
@@ -125,9 +152,18 @@ final class Store {
 
     // MARK: - Filtre et regroupement
 
+    /// Ce qui correspond à la recherche : chaque mot doit apparaître (casse et accents ignorés).
+    func searched<Item: Listable>(_ items: [Item]) -> [Item] {
+        let words = searchText.split(whereSeparator: \.isWhitespace)
+        guard !words.isEmpty else { return items }
+        return items.filter { item in words.allSatisfy { item.searchableText.localizedStandardContains($0) } }
+    }
+
+    /// Recherche et filtre de dépôt : ce qui est affiché, et ce sur quoi agit « tout marquer comme lu ».
     func filtered<Item: Listable>(_ items: [Item]) -> [Item] {
-        guard let repositoryFilter else { return items }
-        return items.filter { $0.repositoryName == repositoryFilter }
+        let matching = searched(items)
+        guard let repositoryFilter else { return matching }
+        return matching.filter { $0.repositoryName == repositoryFilter }
     }
 
     /// Groupé par dépôt dans l'ordre de la liste (donc le plus récent d'abord), ou une seule section à plat.
@@ -167,9 +203,9 @@ final class Store {
 
     func start() async {
         if let count = Demo.count {
-            notifications = Array(Demo.notifications.prefix(count))
+            inbox = Array(Demo.notifications.prefix(count))
             states = Demo.states
-            work = Demo.work
+            fetchedWork = Demo.work
             lastSync = .now
             auth = .signedIn
             return
@@ -211,17 +247,20 @@ final class Store {
         client = nil
         if settings.tokenSource == .keychain { Credentials.deleteFromKeychain() }
         settings.tokenSource = nil
-        notifications = []
-        work = nil
+        inbox = []
+        fetchedWork = nil
         readOnGitHub = []
         recentlyCleared = []
         states = [:]
+        checks = [:]
+        stateStamps = [:]
         seen = nil
         pending = [:]
         lastModified = nil
         workFetchedAt = .distantPast
         historyFetchedAt = .distantPast
         repositoryFilter = nil
+        searchText = ""
         tab = .notifications
         error = nil
         auth = .signedOut(reason)
@@ -250,6 +289,7 @@ final class Store {
     /// À l'ouverture du popover, tout ce qui est visible est remis à jour.
     func popoverOpened() {
         hasNews = false
+        searchText = ""
         Task { await refresh(force: true) }
         Task { await refreshWork() }
         if tab == .history { Task { await refreshHistory() } }
@@ -297,7 +337,7 @@ final class Store {
         guard let client, Date.now.timeIntervalSince(workFetchedAt) >= maxAge else { return }
         workFetchedAt = .now
         do {
-            work = try await client.work()
+            fetchedWork = try await client.work()
         } catch {
             workFetchedAt = .distantPast
             self.error = "Tableau de bord : \(error.localizedDescription)"
@@ -322,29 +362,36 @@ final class Store {
     private func apply(_ items: [GHNotification]) {
         let ids = Set(items.map(\.id))
         pending = pending.filter { ids.contains($0.key) }
-        let visible = items.filter { item in pending[item.id].map { item.updatedAt > $0 } ?? true }
+        let unread = items.filter { item in pending[item.id].map { item.updatedAt > $0 } ?? true }
 
         if let seen {
-            let fresh = visible.filter { item in seen[item.id].map { item.updatedAt > $0 } ?? true }
+            let fresh = unread.filter { item in settings.shows(item) && (seen[item.id].map { item.updatedAt > $0 } ?? true) }
             if !fresh.isEmpty {
                 if settings.systemNotifications { notifier.post(fresh) }
                 hasNews = true
                 onNews?()
             }
         }
-        seen = Dictionary(visible.map { ($0.id, $0.updatedAt) }, uniquingKeysWith: { first, _ in first })
+        seen = Dictionary(unread.map { ($0.id, $0.updatedAt) }, uniquingKeysWith: { first, _ in first })
 
-        withAnimation(.snappy) { notifications = visible }
-        if visible.isEmpty { _ = game.reachInboxZero() }
-        Task { await loadStates(for: visible) }
+        withAnimation(.snappy) { inbox = unread }
+        if notifications.isEmpty { _ = game.reachInboxZero() }
+        Task { await loadStates(for: unread) }
     }
 
+    /// État des PR / issues et CI des PR. Un fil fermé ou mergé ne bouge plus : il n'est redemandé
+    /// que s'il a une nouvelle activité. Un fil ouvert l'est à chaque synchro complète, car sa CI
+    /// peut changer sans que la notification soit mise à jour.
     private func loadStates(for items: [GHNotification]) async {
         guard let client else { return }
         let stale = items.filter { $0.number != nil && stateStamps[$0.id] != $0.updatedAt }
-        guard !stale.isEmpty, let result = try? await client.states(of: stale) else { return }
-        for item in stale { stateStamps[item.id] = item.updatedAt }
-        states.merge(result) { $1 }
+        guard !stale.isEmpty, let result = try? await client.subjects(of: stale) else { return }
+        for item in stale {
+            let info = result[item.id]
+            if info?.state.isOpen != true { stateStamps[item.id] = item.updatedAt }
+            states[item.id] = info?.state ?? states[item.id]
+            checks[item.id] = info?.state.isOpen == true ? info?.checks : nil
+        }
     }
 
     // MARK: - Ouverture et tri
@@ -354,7 +401,7 @@ final class Store {
     func open(_ item: GHNotification, inBackground: Bool = false) {
         guard let client else { return }
         browse(inBackground) { await client.webURL(for: item) }
-        if notifications.contains(where: { $0.id == item.id }) { clear([item]) }
+        if inbox.contains(where: { $0.id == item.id }) { clear([item]) }
     }
 
     func open(_ item: WorkItem, inBackground: Bool = false) {
@@ -386,7 +433,7 @@ final class Store {
             clearedAt[item.id] = .now
         }
         recentlyCleared = Array((items + recentlyCleared.filter { !ids.contains($0.id) }).prefix(50))
-        withAnimation(.snappy) { notifications.removeAll { ids.contains($0.id) } }
+        withAnimation(.snappy) { inbox.removeAll { ids.contains($0.id) } }
 
         let leveledUp = game.award(items.map(\.reason), bulk: bulk)
         if notifications.isEmpty, game.reachInboxZero() {
@@ -424,5 +471,23 @@ final class Store {
     private func play(_ sound: String) {
         guard settings.sounds else { return }
         (NSSound(named: sound)?.copy() as? NSSound)?.play()
+    }
+}
+
+// MARK: - Recherche
+
+extension GHNotification {
+    var searchableText: String {
+        [subject.title, repository.fullName, number.map { "#\($0)" }, Style.reasonLabel(reason), Style.describe(type: subject.type, state: nil)]
+            .compactMap { $0 }
+            .joined(separator: " ")
+    }
+}
+
+extension WorkItem {
+    var searchableText: String {
+        [title, repositoryName, "#\(number)", author.map { "@\($0.login)" }, Style.status(of: self)?.label]
+            .compactMap { $0 }
+            .joined(separator: " ")
     }
 }

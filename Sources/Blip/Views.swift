@@ -7,6 +7,8 @@ struct PopoverView: View {
     let store: Store
     let close: () -> Void
     @State private var showingSettings = false
+    @State private var searching = false
+    @FocusState private var focus: PopoverFocus?
 
     var body: some View {
         Group {
@@ -22,8 +24,11 @@ struct PopoverView: View {
                     if showingSettings {
                         SettingsView(store: store, settings: store.settings)
                     } else {
-                        TabBar(store: store)
-                        TabContent(store: store, close: close).id(store.tab)
+                        TabBar(store: store) { openSearch() }
+                        if searching || !store.searchText.isEmpty {
+                            SearchField(text: Bindable(store).searchText, focus: $focus) { closeSearch() }
+                        }
+                        TabContent(store: store, focus: $focus, close: close).id(store.tab)
                     }
                     Divider()
                     if let release = store.updater.available {
@@ -36,9 +41,21 @@ struct PopoverView: View {
         }
         .frame(width: Self.size.width, height: Self.size.height)
         .onKeyPress(.escape) {
-            close()
+            if searching || !store.searchText.isEmpty { closeSearch() } else { close() }
             return .handled
         }
+    }
+
+    private func openSearch() {
+        showingSettings = false
+        searching = true
+        focus = .search
+    }
+
+    private func closeSearch() {
+        store.searchText = ""
+        searching = false
+        focus = .list
     }
 }
 
@@ -350,6 +367,7 @@ struct SettingsView: View {
                 Toggle("Sons", isOn: $settings.sounds)
                     .help("Petits sons quand tu tries, montes de niveau ou atteins l'inbox zero")
             }
+            VisibilitySection(settings: settings, repositories: store.knownRepositories)
             Section("Système") {
                 Toggle("Lancer à l'ouverture de session", isOn: Binding(get: { launchAtLogin }, set: { setLaunchAtLogin($0) }))
                     .help("Démarre Blip automatiquement quand tu ouvres ta session macOS")
@@ -392,6 +410,83 @@ struct SettingsView: View {
             launchError = error.localizedDescription
         }
         launchAtLogin = SMAppService.mainApp.status == .enabled
+    }
+}
+
+/// Réglages fins de ce que Blip affiche : organisations, dépôts, raisons et types de sujets.
+/// Tout est visible par défaut ; chaque interrupteur ajoute ou retire une exclusion.
+struct VisibilitySection: View {
+    @Bindable var settings: Settings
+    /// Dépôts croisés jusqu'ici, plus ceux déjà masqués.
+    let repositories: [String]
+
+    var body: some View {
+        Section {
+            DisclosureGroup {
+                ForEach(owners, id: \.self) { owner in
+                    Toggle(isOn: visibility(\.hiddenOwners, owner)) {
+                        Text("\(owner), tous ses dépôts").fontWeight(.semibold)
+                    }
+                    .help("Masque tous les dépôts de \(owner), y compris ceux qui apparaîtront plus tard")
+                    ForEach(repositories.filter { Settings.owner(of: $0) == owner }, id: \.self) { repository in
+                        Toggle(Style.shortName(repository), isOn: visibility(\.hiddenRepositories, repository))
+                            .padding(.leading, 16)
+                            .disabled(settings.hiddenOwners.contains(owner))
+                    }
+                }
+            } label: {
+                LabeledContent("Dépôts", value: summary(settings.hiddenOwners.count + settings.hiddenRepositories.count))
+            }
+            DisclosureGroup {
+                ForEach(Style.filterableReasons, id: \.self) { reason in
+                    Toggle(Style.reasonLabel(reason), isOn: visibility(\.hiddenReasons, reason))
+                        .help(Style.reasonHelp(reason))
+                }
+            } label: {
+                LabeledContent("Raisons", value: summary(settings.hiddenReasons.count, feminine: true))
+            }
+            .help("Pourquoi GitHub t'envoie la notification : review, mention, abonnement…")
+            DisclosureGroup {
+                ForEach(Style.subjectKinds, id: \.kind) { subject in
+                    Toggle(subject.label, isOn: visibility(\.hiddenSubjects, subject.kind))
+                }
+            } label: {
+                LabeledContent("Sujets", value: summary(settings.hiddenSubjects.count))
+            }
+            .help("Sur quoi porte la notification : PR, issue, release…")
+            if settings.hidesSomething {
+                Button("Tout réafficher") { settings.showAll() }
+            }
+        } header: {
+            Text("Ce que Blip affiche")
+        } footer: {
+            Text("Ce qui est masqué disparaît partout dans Blip : liste, compteur, humeur, bannières et tableau de bord. Rien ne change sur GitHub.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var owners: [String] {
+        Set(repositories.map { Settings.owner(of: $0) }).union(settings.hiddenOwners)
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    }
+
+    private func summary(_ hidden: Int, feminine: Bool = false) -> String {
+        hidden == 0 ? "Tout est visible" : "\(hidden) masqué\(feminine ? "e" : "")\(hidden > 1 ? "s" : "")"
+    }
+
+    /// Interrupteur « visible » adossé à un ensemble d'exclusions.
+    private func visibility(_ hidden: ReferenceWritableKeyPath<Settings, Set<String>>, _ value: String) -> Binding<Bool> {
+        Binding(
+            get: { !settings[keyPath: hidden].contains(value) },
+            set: { visible in
+                if visible {
+                    settings[keyPath: hidden].remove(value)
+                } else {
+                    settings[keyPath: hidden].insert(value)
+                }
+            }
+        )
     }
 }
 

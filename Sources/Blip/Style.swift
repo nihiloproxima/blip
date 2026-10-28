@@ -110,6 +110,18 @@ enum Style {
         }
     }
 
+    /// Raisons proposées dans les filtres des réglages, des plus urgentes aux plus passives.
+    static let filterableReasons = [
+        "review_requested", "mention", "team_mention", "assign", "approval_requested", "security_alert",
+        "author", "comment", "state_change", "ci_activity", "subscribed", "manual", "invitation",
+    ]
+
+    /// Familles de sujets proposées dans les filtres (voir `GHNotification.subjectKind`).
+    static let subjectKinds: [(kind: String, label: String)] = [
+        ("PullRequest", "Pull requests"), ("Issue", "Issues"), ("Discussion", "Discussions"),
+        ("Release", "Releases"), ("Commit", "Commits"), ("Actions", "GitHub Actions"), ("Security", "Alertes de sécurité"),
+    ]
+
     /// Pourquoi GitHub t'envoie cette notification.
     static func reasonHelp(_ reason: String) -> String {
         switch reason {

@@ -36,6 +36,7 @@ Il y a cinq onglets : Notifs, Mes PR, Reviews, Assignées et Historique.
 | Touche | Action |
 | --- | --- |
 | ⌘1 à ⌘5 | changer d'onglet |
+| ⌘F | rechercher |
 | ↑ ↓ | sélectionner |
 | ↩ | ouvrir (et marquer lu) |
 | ⌘↩ | ouvrir en arrière-plan |

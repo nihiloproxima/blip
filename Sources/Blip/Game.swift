@@ -149,7 +149,37 @@ final class Settings {
     var tokenSource: TokenSource? { didSet { defaults.set(tokenSource?.rawValue, forKey: "tokenSource") } }
     var login: String? { didSet { defaults.set(login, forKey: "login") } }
 
+    // Ce que Blip masque. Tout est vide par défaut : on enregistre les exclusions,
+    // si bien qu'un dépôt qui apparaît plus tard est visible d'office.
+    var hiddenOwners: Set<String> { didSet { defaults.set(hiddenOwners.sorted(), forKey: "hiddenOwners") } }
+    var hiddenRepositories: Set<String> { didSet { defaults.set(hiddenRepositories.sorted(), forKey: "hiddenRepositories") } }
+    var hiddenReasons: Set<String> { didSet { defaults.set(hiddenReasons.sorted(), forKey: "hiddenReasons") } }
+    var hiddenSubjects: Set<String> { didSet { defaults.set(hiddenSubjects.sorted(), forKey: "hiddenSubjects") } }
+
     @ObservationIgnored private let defaults = UserDefaults.standard
+
+    var hidesSomething: Bool {
+        !(hiddenOwners.isEmpty && hiddenRepositories.isEmpty && hiddenReasons.isEmpty && hiddenSubjects.isEmpty)
+    }
+
+    func shows(repository: String) -> Bool {
+        !hiddenRepositories.contains(repository) && !hiddenOwners.contains(Self.owner(of: repository))
+    }
+
+    func shows(_ item: GHNotification) -> Bool {
+        shows(repository: item.repositoryName) && !hiddenReasons.contains(item.reason) && !hiddenSubjects.contains(item.subjectKind)
+    }
+
+    func showAll() {
+        hiddenOwners = []
+        hiddenRepositories = []
+        hiddenReasons = []
+        hiddenSubjects = []
+    }
+
+    static func owner(of repository: String) -> String {
+        repository.split(separator: "/").first.map(String.init) ?? repository
+    }
 
     init() {
         let defaults = UserDefaults.standard
@@ -162,5 +192,9 @@ final class Settings {
         groupByRepository = defaults.bool(forKey: "groupByRepository")
         tokenSource = defaults.string(forKey: "tokenSource").flatMap(TokenSource.init)
         login = defaults.string(forKey: "login")
+        hiddenOwners = Set(defaults.stringArray(forKey: "hiddenOwners") ?? [])
+        hiddenRepositories = Set(defaults.stringArray(forKey: "hiddenRepositories") ?? [])
+        hiddenReasons = Set(defaults.stringArray(forKey: "hiddenReasons") ?? [])
+        hiddenSubjects = Set(defaults.stringArray(forKey: "hiddenSubjects") ?? [])
     }
 }
